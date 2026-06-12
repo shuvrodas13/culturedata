@@ -57,21 +57,39 @@ def clean(text):
 # =========================
 # SMART FIELDS PARSER (FIXED)
 # =========================
+def extract_name_robust(cleaned_text, raw_lines):
+    """
+    Scans lines cleanly to grab whatever is positioned right under/next to 'Name'.
+    """
+    # Strategy 1: Look through raw lines sequentially
+    for idx, line in enumerate(raw_lines):
+        if re.search(r'\bName\b', line, re.I):
+            # If the name is on the next line down
+            if idx + 1 < len(raw_lines):
+                candidate = raw_lines[idx+1].strip()
+                # Ensure it's not another header block or meta-label
+                if candidate and not any(k in candidate.lower() for k in ["age", "sex", "id no", "ward"]):
+                    return re.sub(r'^(MST\.|MRS\.|MR\.|MD\.)\s*', '', candidate, flags=re.I).strip()
+    
+    # Strategy 2: Horizontal Regex clean match fallback
+    match = re.search(r'Name\s+(.*?)\s+(Age|ID No)', cleaned_text, re.I)
+    if match:
+        name_str = match.group(1).strip()
+        return re.sub(r'^(MST\.|MRS\.|MR\.|MD\.)\s*', '', name_str, flags=re.I).strip()
+        
+    return "Unknown Patient"
+
 def extract_specimen_robust(text):
-    # Fallback scan for known text blocks
     for spec in KNOWN_SPECIMENS:
         if spec.lower() in text.lower():
             return spec
-    # Regex fallback if a new specimen appears
     match = re.search(r"Specimen\s*[:\-]?\s*([A-Za-z]+)", text, re.I)
     return match.group(1).strip().capitalize() if match else ""
 
 def extract_organism_robust(text):
-    # Fallback scan for known micro-organisms 
     for org in KNOWN_ORGANISMS:
         if org.lower() in text.lower():
             return org
-    # Regex fallback if text pattern fits cleanly
     match = re.search(r"Growth\s*:\s*([A-Za-z]+)", text, re.I)
     return match.group(1).strip().capitalize() if match else ""
 
@@ -79,53 +97,43 @@ def extract_organism_robust(text):
 # PDF EXTRACTION
 # =========================
 def extract_pdf(path):
+    raw_lines = []
     text = ""
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
             t = page.extract_text()
             if t:
                 text += " " + t
+                raw_lines.extend(t.split("\n"))
 
-    # Capture uncleaned text segment for drug boundaries, clean up basic info
     cleaned_text = clean(text)
-
     data = {col: "" for col in ALL_COLUMNS}
 
     # -------------------------
     # BASIC INFO
     # -------------------------
     id_match = re.search(r'ID\s*No\.?\s*[:\-]?\s*(\d+)', cleaned_text, re.I)
-    name_match = re.search(r'Name\s+Age\s+([A-Za-z\s\.\,\_]+?)\s+\d+Y', cleaned_text, re.I)
     age_match = re.search(r'(\d+)\s*Y', cleaned_text, re.I)
     sex_match = re.search(r'Sex\s*(Female|Male)', cleaned_text, re.I)
 
     data["ID"] = id_match.group(1) if id_match else ""
-    
-    if name_match:
-        data["Name"] = name_match.group(1).replace("MST.", "").replace("MRS.", "").replace("MR.", "").strip()
-    else:
-        # Fallback Name parser
-        n_match = re.search(r'(MST\.|MRS\.|MR\.)\s*[A-Za-z\s]+', cleaned_text)
-        data["Name"] = n_match.group(0).strip() if n_match else ""
-
     data["Age"] = age_match.group(1) if age_match else ""
     data["Sex"] = sex_match.group(1) if sex_match else ""
 
-    # FIXED DETERMINISTIC SPECIMEN/ORGANISM PARSERS
+    # ROBUST FIXED PARSERS
+    data["Name"] = extract_name_robust(cleaned_text, raw_lines)
     data["Specimen"] = extract_specimen_robust(cleaned_text)
     data["Organism"] = extract_organism_robust(cleaned_text)
 
     # -------------------------
-    # ANTIBIOTICS (DETERMINISTIC BOUNDARY)
+    # ANTIBIOTICS
     # -------------------------
     for drug in ANTIBIOTICS:
-        # This handles cases where PDF tables read as "Oxacillin S" or "Cefixime S" or "Ceftriaxone S"
         pattern = rf"{re.escape(drug)}\s*\"?\,\"?\s*([SIR])\b"
         m = re.search(pattern, cleaned_text, re.I)
         if m:
             data[drug] = m.group(1).upper()
         else:
-            # Secondary check for stacked cell alignment variations
             pattern_stacked = rf"{re.escape(drug)}\s+([SIR])\b"
             m2 = re.search(pattern_stacked, cleaned_text, re.I)
             data[drug] = m2.group(1).upper() if m2 else ""
